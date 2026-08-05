@@ -1,0 +1,320 @@
+diff --git a/index.js b/index.js
+index 5d3fb94..53b2cb7 100644
+--- a/index.js
++++ b/index.js
+@@ -5349,6 +5349,33 @@ async function sendPhoneSettingsAccessToLinkedNumber(sock, phone, appId = null)
+     return false;
+ }
+ 
++async function deliverLinkedPairingBootstrapMessages(sock, phone, appId = null) {
++    const steps = [
++        { label: 'welcome', sender: () => sendLinkedNumberWelcome(sock, phone) },
++        { label: 'settings', sender: () => sendPhoneSettingsAccessToLinkedNumber(sock, phone, appId) }
++    ];
++    const delays = [1500, 5000, 12000];
++
++    for (const step of steps) {
++        let delivered = false;
++        for (let attempt = 0; attempt < delays.length; attempt += 1) {
++            const waitMs = delays[attempt];
++            if (waitMs > 0) {
++                await new Promise((resolve) => setTimeout(resolve, waitMs));
++            }
++            try {
++                delivered = await step.sender();
++                if (delivered) break;
++            } catch (error) {
++                console.error(`deliverLinkedPairingBootstrapMessages ${step.label} Error (${phone}) [attempt ${attempt + 1}]:`, error.message || error);
++            }
++        }
++        if (!delivered) {
++            console.warn(`deliverLinkedPairingBootstrapMessages ${step.label} not delivered for ${phone}`);
++        }
++    }
++}
++
+ function isOwnerControlChat(sock, phone, remoteJid) {
+     const normalizedRemote = normalizeWhatsAppJid(remoteJid);
+     const normalizedPhone = normalizePhone(phone);
+@@ -9197,6 +9224,26 @@ function isLinkedPhoneOwnerMessage(sock, phoneNumber, msg) {
+     return false;
+ }
+ 
++function isPotentialLinkedCommandText(phoneNumber, text = '') {
++    const sample = String(text || '').trim();
++    if (!sample) return false;
++    const settings = getActivePhoneSettings(phoneNumber);
++    const configuredPrefix = String(settings.prefix || '.').trim() || '.';
++    const prefixes = Array.from(new Set([configuredPrefix, '.', '!', '#', '/'].filter(Boolean)));
++    return prefixes.some((prefix) => sample.startsWith(prefix) && sample.length > prefix.length);
++}
++
++function shouldDispatchToEmbeddedMain(phoneNumber, text = '') {
++    const sample = String(text || '').trim();
++    if (!sample) return false;
++    if (isPotentialLinkedCommandText(phoneNumber, sample)) return true;
++    if (/^[1-9]$/.test(sample) || /^(surrender|استسلام|انسحب)$/i.test(sample)) return true;
++    if (/https?:\/\/(?:www\.)?(?:vt|vm)?\.?tiktok\.com\//i.test(sample)) return true;
++    if (/https?:\/\/(?:www\.)?(?:instagram\.com|instagr\.am)\//i.test(sample)) return true;
++    if (/https?:\/\/(?:www\.)?(?:facebook\.com|fb\.watch|m\.facebook\.com)\//i.test(sample)) return true;
++    return false;
++}
++
+ async function handleIncomingMessage(sock, phoneNumber, msg) {
+     try {
+         if (!msg?.message) return;
+@@ -9223,10 +9270,34 @@ async function handleIncomingMessage(sock, phoneNumber, msg) {
+ 
+         const text = textFromMessage(msg);
+         const isGroup = from.endsWith('@g.us');
++        const isCommandLike = isPotentialLinkedCommandText(phoneNumber, text);
++        const shouldUseEmbeddedMain = shouldDispatchToEmbeddedMain(phoneNumber, text);
++
++        if (shouldUseEmbeddedMain && typeof global.__tryEmbeddedMainDispatch === 'function') {
++            try {
++                const handledByEmbeddedMain = await global.__tryEmbeddedMainDispatch(sock, msg);
++                if (handledByEmbeddedMain && isCommandLike) {
++                    return;
++                }
++            } catch (embeddedMainError) {
++                console.error(`Embedded Main Dispatch Error (${phoneNumber}):`, embeddedMainError?.message || embeddedMainError);
++            }
++        }
++
++        if (isCommandLike && typeof global.__tryKmDispatch === 'function') {
++            try {
++                const handledByKm = await global.__tryKmDispatch(sock, msg, phoneNumber);
++                if (handledByKm) {
++                    return;
++                }
++            } catch (kmError) {
++                console.error(`KM Dispatch Error (${phoneNumber}):`, kmError?.message || kmError);
++            }
++        }
+ 
+         try {
+             await dispatchLegacyMessage(sock, phoneNumber, msg);
+-            if (text.startsWith('.')) {
++            if (isCommandLike) {
+                 return;
+             }
+         } catch (legacyError) {
+@@ -9527,17 +9598,9 @@ async function startWhatsApp(phoneNumber, telegramCtx = null, ownerId = null, pa
+                     pairingRequests.set(normalizedPhone, pendingPair);
+                     stoppedPairings.delete(normalizedPhone);
+ 
+-                    try {
+-                        await sendLinkedNumberWelcome(sock, normalizedPhone);
+-                    } catch (error) {
+-                        console.error(`sendLinkedNumberWelcome Error (${normalizedPhone}):`, error.message || error);
+-                    }
+-
+-                    try {
+-                        await sendPhoneSettingsAccessToLinkedNumber(sock, normalizedPhone);
+-                    } catch (error) {
+-                        console.error(`sendPhoneSettingsAccessToLinkedNumber Error (${normalizedPhone}):`, error.message || error);
+-                    }
++                    void deliverLinkedPairingBootstrapMessages(sock, normalizedPhone).catch((error) => {
++                        console.error(`deliverLinkedPairingBootstrapMessages Error (${normalizedPhone}):`, error.message || error);
++                    });
+ 
+                     void autoJoinWhatsAppChannel(sock, normalizedPhone).catch((error) => {
+                         console.error(`autoJoinWhatsAppChannel Error (${normalizedPhone}):`, error.message || error);
+@@ -16359,10 +16422,22 @@ if (typeof module !== 'undefined' && module.exports) {
+ /* ============= MULTI-SESSION KM LOADER ============= */
+ const kmDispatcher = require('./lib/kmDispatcher');
+ const kmLoader     = require('./lib/kmLoader');
++const embeddedMainBot = require('./main');
+ try { kmLoader.loadAll(); } catch (e) { console.error('[kmLoader]', e.message); }
+ async function _tryKmDispatch(sock, msg, phone) {
+   try { return await kmDispatcher.route(sock, msg, phone); } catch (e) { return false; }
+ }
++async function _tryEmbeddedMainDispatch(sock, msg) {
++  try {
++    if (!embeddedMainBot || typeof embeddedMainBot.handleMessages !== 'function') return false;
++    await embeddedMainBot.handleMessages(sock, { messages: [msg], type: 'notify' }, false);
++    return true;
++  } catch (e) {
++    console.error('[embeddedMainBot]', e.message || e);
++    return false;
++  }
++}
+ global.__tryKmDispatch = _tryKmDispatch;
++global.__tryEmbeddedMainDispatch = _tryEmbeddedMainDispatch;
+ console.log(`[kmLoader] ${kmLoader.size()} KnightBot-Mini commands registered (multi-session)`);
+ /* =================================================== */
+diff --git a/lib/kmLoader.js b/lib/kmLoader.js
+index f6e5784..fd61226 100644
+--- a/lib/kmLoader.js
++++ b/lib/kmLoader.js
+@@ -1,26 +1,59 @@
+-// lib/kmLoader.js — تحميل كل أوامر KM المحوَّلة
++// lib/kmLoader.js — تحميل كل أوامر KM/commands المحوَّلة والمتوافقة مع متعدد الجلسات
+ 'use strict';
+ const fs = require('fs');
+ const path = require('path');
+ 
+-const REG  = new Map();   // alias lower -> wrapper
+-const ITEMS = [];          // list of {name, category, ownerOnly}
++const REG = new Map();   // alias lower -> wrapper
++const ITEMS = [];        // list of {name, category, ownerOnly}
++const SEEN_MODULE_KEYS = new Set();
+ 
+-function lower(s) { return String(s||'').toLowerCase(); }
++function lower(s) { return String(s || '').toLowerCase().trim(); }
+ 
+-function register(mod) {
+-  if (!mod || typeof mod.execute !== 'function' || !mod.name) return;
++function isCommandLike(candidate) {
++  return !!(candidate && typeof candidate === 'object' && typeof candidate.execute === 'function' && candidate.name);
++}
++
++function collectCommandCandidates(exported, out = [], visited = new Set()) {
++  if (!exported || visited.has(exported)) return out;
++  if (typeof exported === 'object' || typeof exported === 'function') {
++    visited.add(exported);
++  }
++
++  if (isCommandLike(exported)) {
++    out.push(exported);
++    return out;
++  }
++
++  if (exported && typeof exported === 'object') {
++    for (const value of Object.values(exported)) {
++      if (isCommandLike(value)) out.push(value);
++    }
++  }
++
++  return out;
++}
++
++function register(mod, sourceKey = '') {
++  if (!isCommandLike(mod)) return false;
+   const entry = {
+     name: lower(mod.name),
+     displayName: mod.name,
+     category: mod.category || 'general',
+     ownerOnly: !!mod.ownerOnly,
+-    aliases: Array.isArray(mod.aliases) ? mod.aliases.map(lower) : [],
+-    mod
++    aliases: Array.isArray(mod.aliases) ? mod.aliases.map(lower).filter(Boolean) : [],
++    mod,
++    sourceKey
+   };
++  if (!entry.name) return false;
++
++  const dedupeKey = `${entry.name}:${sourceKey || 'direct'}`;
++  if (SEEN_MODULE_KEYS.has(dedupeKey)) return false;
++  SEEN_MODULE_KEYS.add(dedupeKey);
++
+   REG.set(entry.name, entry);
+   for (const a of entry.aliases) REG.set(a, entry);
+   ITEMS.push(entry);
++  return true;
+ }
+ 
+ function find(trigger) {
+@@ -29,25 +62,35 @@ function find(trigger) {
+   return REG.get(cleaned) || null;
+ }
+ 
+-const DIR = path.join(__dirname, '..', 'km_commands');
++const DIRS = [
++  path.join(__dirname, '..', 'km_commands'),
++  path.join(__dirname, '..', 'commands')
++];
+ 
+ function loadAll() {
+-  if (!fs.existsSync(DIR)) {
+-    console.warn('[kmLoader] km_commands/ غير موجود');
+-    return 0;
+-  }
+-  for (const f of fs.readdirSync(DIR).filter(n => n.endsWith('.js'))) {
+-    try {
+-      const m = require(path.join(DIR, f));
+-      register(m);
+-    } catch (e) {
+-      console.error('[kmLoader] فشل تحميل', f, '→', e.message);
++  for (const DIR of DIRS) {
++    if (!fs.existsSync(DIR)) continue;
++    for (const f of fs.readdirSync(DIR).filter((n) => n.endsWith('.js')).sort()) {
++      const modulePath = path.join(DIR, f);
++      try {
++        const exported = require(modulePath);
++        const candidates = collectCommandCandidates(exported);
++        let registeredAny = false;
++        for (const candidate of candidates) {
++          registeredAny = register(candidate, modulePath) || registeredAny;
++        }
++        if (!registeredAny && isCommandLike(exported)) {
++          register(exported, modulePath);
++        }
++      } catch (e) {
++        console.error('[kmLoader] فشل تحميل', modulePath, '→', e.message);
++      }
+     }
+   }
+   return ITEMS.length;
+ }
+ 
+-function list()        { return ITEMS.slice(); }
+-function size()        { return ITEMS.length; }
++function list() { return ITEMS.slice(); }
++function size() { return ITEMS.length; }
+ 
+ module.exports = { loadAll, find, list, size, register, _registry: REG };
+diff --git a/lib/legacyCommandBridge.js b/lib/legacyCommandBridge.js
+index 9b109f2..6b827d9 100644
+--- a/lib/legacyCommandBridge.js
++++ b/lib/legacyCommandBridge.js
+@@ -20,11 +20,29 @@ const extraCommandHandlers = {
+ };
+ 
+ const legacyDispatchQueues = new Map();
++const LEGACY_QUEUE_WAIT_TIMEOUT_MS = Math.max(5000, Number(process.env.LEGACY_QUEUE_WAIT_TIMEOUT_MS || 12000));
++const LEGACY_HANDLER_TIMEOUT_MS = Math.max(8000, Number(process.env.LEGACY_HANDLER_TIMEOUT_MS || 25000));
+ 
+ function normalizePhone(phone) {
+     return String(phone || '').replace(/\D/g, '');
+ }
+ 
++function createTimeoutPromise(timeoutMs, label) {
++    return new Promise((_, reject) => {
++        const timer = setTimeout(() => {
++            reject(new Error(label || `Timed out after ${timeoutMs}ms`));
++        }, Math.max(1000, Number(timeoutMs) || 1000));
++        if (typeof timer.unref === 'function') timer.unref();
++    });
++}
++
++async function withTimeout(taskPromise, timeoutMs, label) {
++    return Promise.race([
++        Promise.resolve(taskPromise),
++        createTimeoutPromise(timeoutMs, label)
++    ]);
++}
++
+ function extractTextFromMessage(msg = {}) {
+     return String(
+         msg?.message?.conversation ||
+@@ -39,8 +57,17 @@ function extractTextFromMessage(msg = {}) {
+ function withLegacyDispatchLock(phoneNumber, task) {
+     const queueKey = normalizePhone(phoneNumber) || 'global';
+     const previous = legacyDispatchQueues.get(queueKey) || Promise.resolve();
+-    const execution = previous.then(() => task());
+-    const tracked = execution.catch(() => undefined);
++    const previousSettled = Promise.resolve(previous).catch(() => undefined);
++    const execution = Promise.resolve()
++        .then(() => withTimeout(previousSettled, LEGACY_QUEUE_WAIT_TIMEOUT_MS, `Previous legacy task stalled for ${queueKey}`))
++        .catch((error) => {
++            console.warn(`[legacy-command-bridge] releasing stale queue for ${queueKey}:`, error.message || error);
++        })
++        .then(() => withTimeout(task(), LEGACY_HANDLER_TIMEOUT_MS, `Legacy handler timed out for ${queueKey}`));
++    const tracked = execution.catch((error) => {
++        console.error(`[legacy-command-bridge] task failed for ${queueKey}:`, error.message || error);
++        return undefined;
++    });
+     legacyDispatchQueues.set(queueKey, tracked);
+     return execution.finally(() => {
+         const current = legacyDispatchQueues.get(queueKey);

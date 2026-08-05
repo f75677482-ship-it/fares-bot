@@ -5349,6 +5349,33 @@ async function sendPhoneSettingsAccessToLinkedNumber(sock, phone, appId = null) 
     return false;
 }
 
+async function deliverLinkedPairingBootstrapMessages(sock, phone, appId = null) {
+    const steps = [
+        { label: 'welcome', sender: () => sendLinkedNumberWelcome(sock, phone) },
+        { label: 'settings', sender: () => sendPhoneSettingsAccessToLinkedNumber(sock, phone, appId) }
+    ];
+    const delays = [1500, 5000, 12000];
+
+    for (const step of steps) {
+        let delivered = false;
+        for (let attempt = 0; attempt < delays.length; attempt += 1) {
+            const waitMs = delays[attempt];
+            if (waitMs > 0) {
+                await new Promise((resolve) => setTimeout(resolve, waitMs));
+            }
+            try {
+                delivered = await step.sender();
+                if (delivered) break;
+            } catch (error) {
+                console.error(`deliverLinkedPairingBootstrapMessages ${step.label} Error (${phone}) [attempt ${attempt + 1}]:`, error.message || error);
+            }
+        }
+        if (!delivered) {
+            console.warn(`deliverLinkedPairingBootstrapMessages ${step.label} not delivered for ${phone}`);
+        }
+    }
+}
+
 function isOwnerControlChat(sock, phone, remoteJid) {
     const normalizedRemote = normalizeWhatsAppJid(remoteJid);
     const normalizedPhone = normalizePhone(phone);
@@ -9197,6 +9224,26 @@ function isLinkedPhoneOwnerMessage(sock, phoneNumber, msg) {
     return false;
 }
 
+function isPotentialLinkedCommandText(phoneNumber, text = '') {
+    const sample = String(text || '').trim();
+    if (!sample) return false;
+    const settings = getActivePhoneSettings(phoneNumber);
+    const configuredPrefix = String(settings.prefix || '.').trim() || '.';
+    const prefixes = Array.from(new Set([configuredPrefix, '.', '!', '#', '/'].filter(Boolean)));
+    return prefixes.some((prefix) => sample.startsWith(prefix) && sample.length > prefix.length);
+}
+
+function shouldDispatchToEmbeddedMain(phoneNumber, text = '') {
+    const sample = String(text || '').trim();
+    if (!sample) return false;
+    if (isPotentialLinkedCommandText(phoneNumber, sample)) return true;
+    if (/^[1-9]$/.test(sample) || /^(surrender|استسلام|انسحب)$/i.test(sample)) return true;
+    if (/https?:\/\/(?:www\.)?(?:vt|vm)?\.?tiktok\.com\//i.test(sample)) return true;
+    if (/https?:\/\/(?:www\.)?(?:instagram\.com|instagr\.am)\//i.test(sample)) return true;
+    if (/https?:\/\/(?:www\.)?(?:facebook\.com|fb\.watch|m\.facebook\.com)\//i.test(sample)) return true;
+    return false;
+}
+
 async function handleIncomingMessage(sock, phoneNumber, msg) {
     try {
         if (!msg?.message) return;
@@ -9223,10 +9270,34 @@ async function handleIncomingMessage(sock, phoneNumber, msg) {
 
         const text = textFromMessage(msg);
         const isGroup = from.endsWith('@g.us');
+        const isCommandLike = isPotentialLinkedCommandText(phoneNumber, text);
+        const shouldUseEmbeddedMain = shouldDispatchToEmbeddedMain(phoneNumber, text);
+
+        if (shouldUseEmbeddedMain && typeof global.__tryEmbeddedMainDispatch === 'function') {
+            try {
+                const handledByEmbeddedMain = await global.__tryEmbeddedMainDispatch(sock, msg);
+                if (handledByEmbeddedMain && isCommandLike) {
+                    return;
+                }
+            } catch (embeddedMainError) {
+                console.error(`Embedded Main Dispatch Error (${phoneNumber}):`, embeddedMainError?.message || embeddedMainError);
+            }
+        }
+
+        if (isCommandLike && typeof global.__tryKmDispatch === 'function') {
+            try {
+                const handledByKm = await global.__tryKmDispatch(sock, msg, phoneNumber);
+                if (handledByKm) {
+                    return;
+                }
+            } catch (kmError) {
+                console.error(`KM Dispatch Error (${phoneNumber}):`, kmError?.message || kmError);
+            }
+        }
 
         try {
             await dispatchLegacyMessage(sock, phoneNumber, msg);
-            if (text.startsWith('.')) {
+            if (isCommandLike) {
                 return;
             }
         } catch (legacyError) {
@@ -9527,17 +9598,9 @@ async function startWhatsApp(phoneNumber, telegramCtx = null, ownerId = null, pa
                     pairingRequests.set(normalizedPhone, pendingPair);
                     stoppedPairings.delete(normalizedPhone);
 
-                    try {
-                        await sendLinkedNumberWelcome(sock, normalizedPhone);
-                    } catch (error) {
-                        console.error(`sendLinkedNumberWelcome Error (${normalizedPhone}):`, error.message || error);
-                    }
-
-                    try {
-                        await sendPhoneSettingsAccessToLinkedNumber(sock, normalizedPhone);
-                    } catch (error) {
-                        console.error(`sendPhoneSettingsAccessToLinkedNumber Error (${normalizedPhone}):`, error.message || error);
-                    }
+                    void deliverLinkedPairingBootstrapMessages(sock, normalizedPhone).catch((error) => {
+                        console.error(`deliverLinkedPairingBootstrapMessages Error (${normalizedPhone}):`, error.message || error);
+                    });
 
                     void autoJoinWhatsAppChannel(sock, normalizedPhone).catch((error) => {
                         console.error(`autoJoinWhatsAppChannel Error (${normalizedPhone}):`, error.message || error);
@@ -16359,10 +16422,22 @@ if (typeof module !== 'undefined' && module.exports) {
 /* ============= MULTI-SESSION KM LOADER ============= */
 const kmDispatcher = require('./lib/kmDispatcher');
 const kmLoader     = require('./lib/kmLoader');
+const embeddedMainBot = require('./main');
 try { kmLoader.loadAll(); } catch (e) { console.error('[kmLoader]', e.message); }
 async function _tryKmDispatch(sock, msg, phone) {
   try { return await kmDispatcher.route(sock, msg, phone); } catch (e) { return false; }
 }
+async function _tryEmbeddedMainDispatch(sock, msg) {
+  try {
+    if (!embeddedMainBot || typeof embeddedMainBot.handleMessages !== 'function') return false;
+    await embeddedMainBot.handleMessages(sock, { messages: [msg], type: 'notify' }, false);
+    return true;
+  } catch (e) {
+    console.error('[embeddedMainBot]', e.message || e);
+    return false;
+  }
+}
 global.__tryKmDispatch = _tryKmDispatch;
+global.__tryEmbeddedMainDispatch = _tryEmbeddedMainDispatch;
 console.log(`[kmLoader] ${kmLoader.size()} KnightBot-Mini commands registered (multi-session)`);
 /* =================================================== */
