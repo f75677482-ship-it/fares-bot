@@ -1,39 +1,21 @@
-# Multi-Session Fix — Fares Bot
+# تغييرات الدمج — faresw_bot (Multi-Session + KnightBot-Mini)
 
-## المشكلة
-ربط رقم جديد يفصل الرقم السابق لأن المشروع فيه **singleton واحد فقط** للسوكيت (`pairingBridge.primarySocket`)، و`bot_core.py` يحوي نفس `createSocket` مكررًا مرتين، و`main.js` يستخدم آخر سوكيت فقط، و`start.sh` يشغّل Python فقط دون Node الذي يحمل خريطة المآخذ. كل رقم كان يشارك نفس مجلد الجلسة → أول كتابة تدمّر ما قبلها.
+## أوامر KM المدمجة في fares-bot (120 أمر)
+كل أمر يتلقى `sock` بحسب الرقم المربوط من pairingBridge. لا توجد
+متغيرات عامة على مستوى الوحدة، ولا تخزين مختلط بين الأرقام.
 
-## الحل (Multi-Session حقيقي، كل رقم في مساره الخاص)
+- الحقوق الموحدة: `lib/commonPromo.js` — نفس التوقيع في كل أمر
+- قاعدة البيانات المعزولة لكل رقم: `lib/kmDatabase.js`
+- حمّال الأوامر: `lib/kmLoader.js`
+- مُوجّه per-session: `lib/kmDispatcher.js`
+- تخزين الجلسات: `sessions/<phone>/database/` لكل رقم مساره الخاص
 
-### ملفات معدّلة
-| الملف | التعديل |
-|------|--------|
-| `lib/pairingBridge.js` | حُذف `primarySocket`؛ كل سوكيت يُخزَّن بمفتاح رقمه في `socketMap`؛ `setSocket` يرفض التسجيل بدون رقم صريح؛ انتقال رقم لا يمس الأرقام الأخرى |
-| `lib/sessionManager.js` | **جديد** — يدير `sessions/<phone>/` و `sessions/index.json`، مع `listPersistedPhones()` التي تُرجع كل الأرقام المخزّنة للاستعادة التلقائية |
-| `start.sh` | يُشغّل Node و Python معًا في الخلفية (الـNode يحمل `waClients` Map الـPython يساعد بالمصادقة) |
-| `bot_core.py` | حُذفت النسخة المكررة الثانية من `createSocket`/`useMongoAuthState` التي كانت تُلغي النسخة الأولى |
-| `bot_core.py.bak` | نسخة احتياطية من الأصلي |
-
-### ملف جديد مرفق: `multi_session.patch`
-يحتوي نفس التعديلات بصيغة unified diff ليُطبَّق على فرعك مباشرة.
-
-## خطوات التطبيق على مشروعك
-```bash
-# 1) نظّف الجلسة القديمة (اختياري لكن موصى به)
-rm -rf sessions/
-
-# 2) استبدل الملفات المعدّلة في مستودعك
-cp lib/pairingBridge.js   <repo>/lib/pairingBridge.js
-cp lib/sessionManager.js   <repo>/lib/sessionManager.js
-cp start.sh               <repo>/start.sh
-cp bot_core.py            <repo>/bot_core.py
-chmod +x start.sh
-
-# 3) اربط كل رقم عبر رقم هاتف مختلف — كل رقم يأخذ مجلده.
+## الحقوق
+- حُذفت كل الحقوق الأصلية (github/knight/t.me/mruniquehacker)
+- استُبدلت بـ:
 ```
-
-## كيف يحدث العزل
-1. **`lib/pairingBridge.js`** — مفتاح الخريطة = رقم الهاتف؛ أي رقم `waClients.delete(otherPhone)` لا يمس سوابقه.
-2. **`lib/sessionManager.js`** — `getPhoneSessionDir(phone)` يرجع `sessions/<digits>/` لبايلز.
-3. **`start.sh`** — يضمن بقاء Node (مالك `waClients` و `pairingBridge`) حيًّا مع Python.
-4. **`bot_core.py`** — دالة `createSocket` واحدة فقط، لا استبدال صامت.
+━━━━━━━━━━━━━━━━━━━━
+اصنع بوت واتساب خاص فيك مجاناً
+👉 Undress https://t.me/Faresw_bot
+━━━━━━━━━━━━━━━━━━━━
+```

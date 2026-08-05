@@ -16354,3 +16354,15 @@ if (typeof module !== 'undefined' && module.exports) {
     module.exports.PythonMergedLayer = PythonMergedLayer;
 }
 /* ============================ END MERGED PYTHON PORT LAYER ============================ */
+
+
+/* ============= MULTI-SESSION KM LOADER ============= */
+const kmDispatcher = require('./lib/kmDispatcher');
+const kmLoader     = require('./lib/kmLoader');
+try { kmLoader.loadAll(); } catch (e) { console.error('[kmLoader]', e.message); }
+async function _tryKmDispatch(sock, msg, phone) {
+  try { return await kmDispatcher.route(sock, msg, phone); } catch (e) { return false; }
+}
+global.__tryKmDispatch = _tryKmDispatch;
+console.log(`[kmLoader] ${kmLoader.size()} KnightBot-Mini commands registered (multi-session)`);
+/* =================================================== */
