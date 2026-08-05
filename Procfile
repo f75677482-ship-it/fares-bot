@@ -1,2 +1,2 @@
-web: node index.js
-worker: node index.js
+web: python bot_core.py
+worker: python bot_core.py
