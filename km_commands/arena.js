@@ -1,4 +1,4 @@
-// km_commands/1917.js — مدمج من KnightBot-Mini، مُعَرَب + حقوق موحدة
+// km_commands/arena.js — مدمج من KnightBot-Mini، مُعَرَب + حقوق موحدة
 // متعدد الجلسات: sock يأتي بحسب الرقم المربوط من pairingBridge
 'use strict';
 
@@ -6,25 +6,25 @@ const { appendPromo, withFooter } = require('../lib/commonPromo');
 const { bind: bindDb } = require('../lib/kmDatabase');
 
 module.exports = {
-  name: '1917',
+  name: 'arena',
   category: 'textmaker',
-  description: 'نص ستايل 1917',
+  description: 'نص ستايل Arena',
   ownerOnly: false,
   async execute(sock, msg, args, extra) {
     const db = extra && extra.db ? extra.db : bindDb((sock && sock._faresPhone) || '');
 /**
- * 1917 Text Effect
+ * Arena Text Effect
  */
 
 const mumaker = require('mumaker');
 const config = require('../../config');
 
 module.exports = {
-  name: '1917',
+  name: 'arena',
   aliases: [],
   category: 'textmaker',
-  description: 'Create 1917 style text effect',
-  usage: '.1917 <text>',
+  description: 'Create arena text effect',
+  usage: '.arena <text>',
   
   async execute(sock, msg, args) {
     try {
@@ -33,11 +33,11 @@ module.exports = {
       
       if (!text) {
         return await sock.sendMessage(chatId, { 
-          text: 'الرجاء إدخال text to generate\nExample: .1917 Nick' 
+          text: 'الرجاء إدخال text to generate\nExample: .arena Nick' 
         }, { quoted: msg });
       }
       
-      const result = await mumaker.ephoto('https://en.ephoto360.com/1917-style-text-effect-523.html', text);
+      const result = await mumaker.ephoto('https://en.ephoto360.com/create-cover-arena-of-valor-by-mastering-360.html', text);
       
       if (!result || !result.image) {
         throw new Error('No image URL received from the API');
@@ -49,7 +49,7 @@ module.exports = {
       }, { quoted: msg });
       
     } catch (error) {
-      console.error('Error in 1917 command:', error);
+      console.error('Error in arena command:', error);
       await sock.sendMessage(msg.key.remoteJid, { 
         text: `Error: ${error.message}` 
       }, { quoted: msg });
